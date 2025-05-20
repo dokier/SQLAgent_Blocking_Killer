@@ -1,20 +1,21 @@
 USE [NSP_TEMP]
 GO
 
-/****** Object:  StoredProcedure [dbo].[Agent_Job_Blocking_Monitor_And_Killer]    Script Date: 5/19/2025 2:22:53 PM ******/
+/****** Object:  StoredProcedure [dbo].[Agent_Job_Blocking_Monitor_And_Killer]    Script Date: 5/20/2025 8:18:21 AM ******/
 SET ANSI_NULLS ON
 GO
 
 SET QUOTED_IDENTIFIER ON
 GO
 
-
-CREATE   PROCEDURE [dbo].[Agent_Job_Blocking_Monitor_And_Killer]
+CREATE OR ALTER PROCEDURE [dbo].[Agent_Job_Blocking_Monitor_And_Killer]
     @SecondsThreshold INT = 30,
     @SampleIntervalSeconds INT = 5
 AS
 BEGIN TRY
     SET NOCOUNT ON;
+	SET XACT_ABORT ON;
+	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
     IF NOT EXISTS (
         SELECT 1
@@ -85,7 +86,7 @@ BEGIN TRY
             s.session_id,
             s.program_name,
             s.login_name,
-            s.status AS SessionStatus,
+            COALESCE(r.status,s.status) AS SessionStatus,
             DB_NAME(s.database_id) AS DatabaseName,
             r.sql_handle,
             j.name AS JobName,
@@ -114,6 +115,7 @@ BEGIN TRY
                         CHARINDEX(')', s.program_name) - CHARINDEX(': Step', s.program_name) - 6
                     )) AS INT)
         ) js
+		WHERE r.command NOT LIKE 'KILLED/ROLLBACK%'
     )
     SELECT DISTINCT
         s.session_id AS SPID,
@@ -155,11 +157,16 @@ BEGIN TRY
         FROM #ConfirmedBlockersToKill;
 
         -- Get blocked SPIDs for logging
-        SELECT @BlockedSessions = STRING_AGG(CONVERT(NVARCHAR(10), session_id), ',')
-        FROM sys.dm_exec_requests
-        WHERE blocking_session_id = @SPID;
+		SELECT @BlockedSessions = STRING_AGG(CONVERT(NVARCHAR(10), BlockedSessionId), ',')
+		FROM (
+			SELECT DISTINCT BlockedSessionId
+			FROM #BlockerSnapshots
+			WHERE BlockerSessionId = @SPID
+		) AS DistinctBlocked;
 
-        BEGIN TRY
+
+
+BEGIN TRY
             DECLARE @KillCommand NVARCHAR(100) = 'KILL ' + CAST(@SPID AS NVARCHAR(10));
             EXEC (@KillCommand);
 
