@@ -1,21 +1,25 @@
 USE [NSP_TEMP]
 GO
 
-/****** Object:  StoredProcedure [dbo].[Agent_Job_Blocking_Monitor_And_Killer]    Script Date: 5/20/2025 8:18:21 AM ******/
+/****** Object:  StoredProcedure [dbo].[Agent_Job_Blocking_Monitor_And_Killer_3]    Script Date: 5/20/2025 10:11:30 PM ******/
 SET ANSI_NULLS ON
 GO
 
 SET QUOTED_IDENTIFIER ON
 GO
 
-CREATE OR ALTER PROCEDURE [dbo].[Agent_Job_Blocking_Monitor_And_Killer]
+
+CREATE PROCEDURE [dbo].[Agent_Job_Blocking_Monitor_And_Killer_3]
     @SecondsThreshold INT = 30,
-    @SampleIntervalSeconds INT = 5
+    @SampleIntervalSeconds INT = 5,
+    @MinSnapshotPercent INT = 90  -- NEW: % of samples a blocker must appear in to be considered confirmed
 AS
 BEGIN TRY
     SET NOCOUNT ON;
-	SET XACT_ABORT ON;
-	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+    SET XACT_ABORT ON;
+    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+    DECLARE @TotalSnapshotsExpected INT = CEILING(1.0 * @SecondsThreshold / @SampleIntervalSeconds);  -- NEW
 
     IF NOT EXISTS (
         SELECT 1
@@ -67,19 +71,15 @@ BEGIN TRY
         SET @ElapsedSeconds += @SampleIntervalSeconds;
     END
 
-    ;WITH SnapshotCount AS (
-        SELECT COUNT(DISTINCT SnapshotTime) AS TotalSnapshots FROM #BlockerSnapshots
-    ),
-    ConsistentBlockers AS (
+    ;WITH ConsistentBlockers AS (
         SELECT BlockerSessionId, COUNT(DISTINCT SnapshotTime) AS SeenSnapshots
         FROM #BlockerSnapshots
         GROUP BY BlockerSessionId
     ),
     ConfirmedBlockers AS (
-        SELECT b.BlockerSessionId
-        FROM ConsistentBlockers b
-        CROSS JOIN SnapshotCount sc
-        WHERE b.SeenSnapshots = sc.TotalSnapshots
+        SELECT BlockerSessionId
+        FROM ConsistentBlockers
+        WHERE SeenSnapshots * 100.0 / @TotalSnapshotsExpected >= @MinSnapshotPercent  -- UPDATED logic
     ),
     JobSessions AS (
         SELECT 
@@ -115,7 +115,7 @@ BEGIN TRY
                         CHARINDEX(')', s.program_name) - CHARINDEX(': Step', s.program_name) - 6
                     )) AS INT)
         ) js
-		WHERE r.command NOT LIKE 'KILLED/ROLLBACK%'
+        WHERE r.command NOT LIKE 'KILLED/ROLLBACK%'
     )
     SELECT DISTINCT
         s.session_id AS SPID,
@@ -156,17 +156,14 @@ BEGIN TRY
             @CommandText = CommandText
         FROM #ConfirmedBlockersToKill;
 
-        -- Get blocked SPIDs for logging
-		SELECT @BlockedSessions = STRING_AGG(CONVERT(NVARCHAR(10), BlockedSessionId), ',')
-		FROM (
-			SELECT DISTINCT BlockedSessionId
-			FROM #BlockerSnapshots
-			WHERE BlockerSessionId = @SPID
-		) AS DistinctBlocked;
+        SELECT @BlockedSessions = STRING_AGG(CONVERT(NVARCHAR(10), BlockedSessionId), ',')
+        FROM (
+            SELECT DISTINCT BlockedSessionId
+            FROM #BlockerSnapshots
+            WHERE BlockerSessionId = @SPID
+        ) AS DistinctBlocked;
 
-
-
-BEGIN TRY
+        BEGIN TRY
             DECLARE @KillCommand NVARCHAR(100) = 'KILL ' + CAST(@SPID AS NVARCHAR(10));
             EXEC (@KillCommand);
 
@@ -195,5 +192,3 @@ BEGIN CATCH
     THROW;
 END CATCH;
 GO
-
-
