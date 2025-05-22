@@ -1,7 +1,7 @@
 USE [NSP_TEMP]
 GO
 
-/****** Object:  StoredProcedure [dbo].[Agent_Job_Blocking_Monitor_And_Killer_3]    Script Date: 5/20/2025 10:11:30 PM ******/
+/****** Object:  StoredProcedure [dbo].[Agent_Job_Blocking_Monitor_And_Killer]    Script Date: 5/22/2025 2:07:39 PM ******/
 SET ANSI_NULLS ON
 GO
 
@@ -9,17 +9,17 @@ SET QUOTED_IDENTIFIER ON
 GO
 
 
-CREATE PROCEDURE [dbo].[Agent_Job_Blocking_Monitor_And_Killer_3]
+CREATE OR ALTER PROCEDURE [dbo].[Agent_Job_Blocking_Monitor_And_Killer]
     @SecondsThreshold INT = 30,
     @SampleIntervalSeconds INT = 5,
-    @MinSnapshotPercent INT = 90  -- NEW: % of samples a blocker must appear in to be considered confirmed
+    @MinSnapshotPercent INT = 90  -- % of samples a blocker must appear in to be considered confirmed
 AS
 BEGIN TRY
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
     SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-    DECLARE @TotalSnapshotsExpected INT = CEILING(1.0 * @SecondsThreshold / @SampleIntervalSeconds);  -- NEW
+    DECLARE @TotalSnapshotsExpected INT = CEILING(1.0 * @SecondsThreshold / @SampleIntervalSeconds);
 
     IF NOT EXISTS (
         SELECT 1
@@ -79,7 +79,7 @@ BEGIN TRY
     ConfirmedBlockers AS (
         SELECT BlockerSessionId
         FROM ConsistentBlockers
-        WHERE SeenSnapshots * 100.0 / @TotalSnapshotsExpected >= @MinSnapshotPercent  -- UPDATED logic
+        WHERE SeenSnapshots * 100.0 / @TotalSnapshotsExpected >= @MinSnapshotPercent
     ),
     JobSessions AS (
         SELECT 
@@ -155,6 +155,23 @@ BEGIN TRY
             @LoginName = LoginName,
             @CommandText = CommandText
         FROM #ConfirmedBlockersToKill;
+
+        -- Revalidate SPID is still blocking and still tied to an active whitelisted SQL Agent job
+        IF NOT EXISTS (
+            SELECT 1
+            FROM sys.dm_exec_requests r
+            JOIN sys.dm_exec_sessions s ON r.blocking_session_id = s.session_id
+            JOIN msdb.dbo.sysjobs j ON s.program_name LIKE '%SQLAgent - TSQL JobStep (Job ' + 
+                CONVERT(VARCHAR(MAX), CONVERT(BINARY(16), j.job_id), 1) + '%'
+            JOIN NSP_TEMP.dbo.Agent_Job_Blocking_Whitelist wl ON j.name = wl.JobName
+            WHERE r.blocking_session_id = @SPID
+              AND wl.IsActive = 1
+              AND r.command NOT LIKE 'KILLED/ROLLBACK%'
+        )
+        BEGIN
+            DELETE FROM #ConfirmedBlockersToKill WHERE SPID = @SPID;
+            CONTINUE;
+        END
 
         SELECT @BlockedSessions = STRING_AGG(CONVERT(NVARCHAR(10), BlockedSessionId), ',')
         FROM (
