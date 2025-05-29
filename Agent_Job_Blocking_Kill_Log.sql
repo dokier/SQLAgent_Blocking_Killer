@@ -1,7 +1,7 @@
 USE [NSP_TEMP]
 GO
 
-/****** Object:  Table [dbo].[Agent_Job_Blocking_Kill_Log]    Script Date: 5/19/2025 2:29:25 PM ******/
+/****** Object:  Table [dbo].[Agent_Job_Blocking_Kill_Log]    Script Date: 5/29/2025 4:09:46 PM ******/
 SET ANSI_NULLS ON
 GO
 
@@ -21,6 +21,10 @@ CREATE TABLE [dbo].[Agent_Job_Blocking_Kill_Log](
 	[LoginName] [nvarchar](128) NULL,
 	[CommandText] [nvarchar](max) NULL,
 	[BlockedSessions] [nvarchar](max) NULL,
+	[SecondsThreshold] [int] NULL,
+	[SampleIntervalSeconds] [int] NULL,
+	[MinSnapshotPercent] [int] NULL,
+	[BlockedSessionInfo] [nvarchar](max) NULL,
 PRIMARY KEY CLUSTERED 
 (
 	[Id] ASC
@@ -33,5 +37,3 @@ GO
 
 ALTER TABLE [dbo].[Agent_Job_Blocking_Kill_Log] ADD  CONSTRAINT [DF_KilledBy]  DEFAULT (original_login()) FOR [KilledBy]
 GO
-
-
