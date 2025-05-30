@@ -1,14 +1,15 @@
 USE [NSP_TEMP]
 GO
 
-/****** Object:  StoredProcedure [dbo].[Agent_Job_Blocking_Monitor_And_Killer3]    Script Date: 5/29/2025 2:46:45 PM ******/
+/****** Object:  StoredProcedure [dbo].[Agent_Job_Blocking_Monitor_And_Killer4]    Script Date: 5/30/2025 12:55:18 PM ******/
 SET ANSI_NULLS ON
 GO
 
 SET QUOTED_IDENTIFIER ON
 GO
 
-CREATE OR ALTER PROCEDURE [dbo].[Agent_Job_Blocking_Monitor_And_Killer]
+
+CREATE OR ALTER PROCEDURE [dbo].[Agent_Job_Blocking_Monitor_And_Killer4]
     @SecondsThreshold INT = 30,
     @SampleIntervalSeconds INT = 5,
     @MinSnapshotPercent INT = 90
@@ -167,7 +168,7 @@ BEGIN TRY
             @CommandText = CommandText
         FROM #ConfirmedBlockersToKill;
 
-        IF NOT EXISTS (
+		 IF NOT EXISTS (
             SELECT 1
             FROM sys.dm_exec_requests r
             JOIN sys.dm_exec_sessions s ON r.blocking_session_id = s.session_id
@@ -183,12 +184,44 @@ BEGIN TRY
             CONTINUE;
         END
 
-        SELECT @BlockedSessions = STRING_AGG(CONVERT(NVARCHAR(10), BlockedSessionId), ',')
-        FROM (
-            SELECT DISTINCT BlockedSessionId
-            FROM #BlockerSnapshots
-            WHERE BlockerSessionId = @SPID
-        ) AS DistinctBlocked;
+        DECLARE @AllBlockedAreSentry BIT = 1;
+        DECLARE @AnyBlockedIsAlsoBlocker BIT = 0;
+
+        SELECT 
+            @AllBlockedAreSentry = 
+                CASE 
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM sys.dm_exec_requests r
+                        JOIN sys.dm_exec_sessions s ON r.session_id = s.session_id
+                        WHERE r.blocking_session_id = @SPID
+                          AND s.program_name NOT LIKE '%Sentry%'
+                    ) THEN 0 ELSE 1 
+                END;
+
+        SELECT @AnyBlockedIsAlsoBlocker = 
+            CASE 
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM sys.dm_exec_requests r
+                    WHERE r.blocking_session_id IN (
+                        SELECT r2.session_id
+                        FROM sys.dm_exec_requests r2
+                        WHERE r2.blocking_session_id = @SPID
+                    )
+                )
+                THEN 1 ELSE 0
+            END;
+
+        IF @AllBlockedAreSentry = 1 AND @AnyBlockedIsAlsoBlocker = 0
+        BEGIN
+            DELETE FROM #ConfirmedBlockersToKill WHERE SPID = @SPID;
+            CONTINUE;
+        END
+
+        SELECT @BlockedSessions = STRING_AGG(CONVERT(NVARCHAR(10), r.session_id), ',')
+        FROM sys.dm_exec_requests r
+        WHERE r.blocking_session_id = @SPID;
 
         SELECT @BlockedSessionInfo = (
             SELECT 
@@ -202,14 +235,10 @@ BEGIN TRY
                 r_sql.text AS sql_text,
                 r.last_wait_type,
                 r.wait_resource
-            FROM sys.dm_exec_sessions s
-            LEFT JOIN sys.dm_exec_requests r ON s.session_id = r.session_id
+            FROM sys.dm_exec_requests r
+            JOIN sys.dm_exec_sessions s ON r.session_id = s.session_id
             OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) AS r_sql
-            WHERE s.session_id IN (
-                SELECT DISTINCT BlockedSessionId
-                FROM #BlockerSnapshots
-                WHERE BlockerSessionId = @SPID
-            )
+            WHERE r.blocking_session_id = @SPID
             FOR JSON PATH, ROOT('BlockedSessions')
         );
 
@@ -246,35 +275,37 @@ BEGIN TRY
 
     IF EXISTS (SELECT 1 FROM @KillReport)
     BEGIN
-		DECLARE @Body NVARCHAR(MAX) = 
-		N'<style>
-		  td {
-			padding: 2px;
-			border:1px solid #4a81aa;
-			font-family:Arial, Helvetica, sans-serif;
-			font-size:10pt;
-			word-wrap: break-word;
-			overflow-wrap: break-word;
-			white-space: normal;
-		  }
-		  div {
-			font-family:Arial, Helvetica, sans-serif;
-			font-size:10pt;
-		  }
-		</style>
-		<div style="width:100%;">
-		<table style="border:3px solid #4a81aa; background-color:#f6f6e6; width: 1600px; margin:0px auto; border-spacing: 0px; border-collapse: collapse;" align="center">
-		  <tr>
-			<td style="font-weight:bold;text-align:center;">SPID</td>
-			<td style="font-weight:bold;text-align:center;">JobName</td>
-			<td style="font-weight:bold;text-align:center;">JobStepName</td>
-			<td style="font-weight:bold;text-align:center;">DatabaseName</td>
-			<td style="font-weight:bold;text-align:center;">SessionStatus</td>
-			<td style="font-weight:bold;text-align:center;">LoginName</td>
-			<td style="font-weight:bold;text-align:center;">CommandText</td>
-			<td style="font-weight:bold;text-align:center;">BlockedSessions</td>
-		  </tr>';
-
+        DECLARE @Body NVARCHAR(MAX) = 
+        N'<style>
+          td {
+            padding: 2px;
+            border:1px solid #4a81aa;
+            font-family:Arial, Helvetica, sans-serif;
+            font-size:10pt;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            white-space: normal;
+          }
+          div {
+            font-family:Arial, Helvetica, sans-serif;
+            font-size:10pt;
+          }
+        </style>
+		<div style="width:100%; text-align:center; margin-bottom:10px;">
+			For additional details, refer to the <strong>Agent_Job_Blocking_Kill_Log</strong> table in the <strong>My Database</strong> database.
+		</div>
+        <div style="width:100%;">
+        <table style="border:3px solid #4a81aa; background-color:#f6f6e6; width: 1600px; margin:0px auto; border-spacing: 0px; border-collapse: collapse;" align="center">
+          <tr>
+            <td style="font-weight:bold;text-align:center;">SPID</td>
+            <td style="font-weight:bold;text-align:center;">JobName</td>
+            <td style="font-weight:bold;text-align:center;">JobStepName</td>
+            <td style="font-weight:bold;text-align:center;">DatabaseName</td>
+            <td style="font-weight:bold;text-align:center;">SessionStatus</td>
+            <td style="font-weight:bold;text-align:center;">LoginName</td>
+            <td style="font-weight:bold;text-align:center;">CommandText</td>
+            <td style="font-weight:bold;text-align:center;">BlockedSessions</td>
+          </tr>';
 
         SELECT @Body += 
             N'<tr>' +
@@ -294,7 +325,7 @@ BEGIN TRY
         DECLARE @subject NVARCHAR(300) = @@SERVERNAME + ' - Blocking SPIDs Killed - SQL Agent Job Monitor';
 
         EXEC msdb.dbo.sp_send_dbmail
-            @recipients = '<enter email address>',
+            @recipients = '<email address>',
             @subject = @subject,
             @body = @Body,
             @body_format = 'HTML';
@@ -309,3 +340,5 @@ BEGIN CATCH
     THROW;
 END CATCH;
 GO
+
+
